@@ -1,0 +1,38 @@
+# --- WATCHSYNC BEGIN (do not remove this marker) ---
+watch.darkfamily.ir {
+	encode zstd gzip
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# کانتینر client روی شبکه filemanager_default است؛ Caddy با همان نام dockerdns آنرا پیدا میکند.
+	# ارسال هدر Real-IP لازم است تا rate-limit سرور بر اساس IP واقعی کاربر باشد.
+	# X-Forwarded-For/Proto توسط Caddy بهصورت پیشفرض تنظیم میشود.
+	reverse_proxy watchsync-client:80 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		transport http {
+			read_buffer 64KiB
+			write_buffer 64KiB
+			keepalive 90s
+			keepalive_idle_conns 64
+			dial_timeout 5s
+			response_header_timeout 60s
+		}
+		lb_try_duration 5s
+		stream_close_delay 5m
+	}
+
+	log {
+		output file /data/watchsync-access.log {
+			roll_size 20mb
+			roll_keep 5
+		}
+		format json
+	}
+}
+# --- WATCHSYNC END ---

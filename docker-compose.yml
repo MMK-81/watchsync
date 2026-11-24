@@ -1,0 +1,172 @@
+name: watchsync
+
+# WatchSync — نسخه تطبیق دادهشده با سرور darkfamily
+# تفاوت با نسخه upstream:
+#  - شبکه بیرونی `proxy` به `filemanager_default` تغییر کرده تا Caddy موجود
+#    (که در استک filemanager اجرا میشود) بتواند watchsync-client را پیدا کند.
+#  - ایمیج bgutil بهصورت محلی ساخته میشود (Docker Hub روی سرور درست کار نمیکند).
+#  - محدودیتهای RAM/ tmpfs متناسب با سرور ۴ گیگ تنظیم شدهاند.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-security: &security
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  watchsync-server:
+    image: watchsync-server:latest
+    container_name: watchsync-server
+    restart: unless-stopped
+    <<: *security
+    logging: *logging
+    mem_limit: 1536m
+    cpus: "2.0"
+    pids_limit: 512
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3000
+      - CORS_ORIGIN=${PUBLIC_ORIGIN:-https://watch.darkfamily.ir}
+      - RUST_LOG=${LOG_LEVEL:-info}
+      - TRUSTED_PROXIES
+      - RESOLVER_URL=${RESOLVER_URL:-http://watchsync-resolver:8080}
+      - ALLOW_PRIVATE_URLS=${ALLOW_PRIVATE_URLS:-false}
+      - DATABASE_PATH=/data/watchsync.db
+      - REGISTRATION_ENABLED=${REGISTRATION_ENABLED:-true}
+      - MAX_ROOMS_PER_USER=${MAX_ROOMS_PER_USER:-5}
+      - COOKIE_SECURE=${COOKIE_SECURE:-true}
+      - MAX_USERS_PER_ROOM
+      - MAX_ROOMS
+      - MAX_QUEUE_LENGTH
+      - EMPTY_ROOM_TTL_MS
+      - RECONNECT_GRACE_MS
+      - HEARTBEAT_MS
+      - DRIFT_TOLERANCE_SEC
+      - CHAT_HISTORY_LIMIT
+      - SESSION_TTL_DAYS
+      - ALLOWED_RATES
+      - HLS_SEGMENT_SEC
+      - STREAM_AUDIO_BITRATE
+      - STREAM_READY_TIMEOUT_SEC
+      - STREAM_MAX_BYTES
+      - STREAMS_DIR
+    depends_on:
+      watchsync-resolver:
+        condition: service_healthy
+    networks:
+      watchsync-internal:
+        aliases:
+          - watchsync-server-int
+    volumes:
+      - watchsync-streams:/dev/shm/streams
+      - watchsync-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  watchsync-resolver:
+    image: watchsync-resolver:latest
+    container_name: watchsync-resolver
+    restart: unless-stopped
+    <<: *security
+    logging: *logging
+    mem_limit: 768m
+    cpus: "1.5"
+    pids_limit: 256
+    environment:
+      - POT_PROVIDER_URL=${POT_PROVIDER_URL:-http://watchsync-bgutil:4416}
+      - ALLOW_PRIVATE_URLS=${ALLOW_PRIVATE_URLS:-false}
+      - RESOLVE_TIMEOUT
+      - SUBS_CACHE_TTL
+      - BODY_CACHE_MAX_BYTES
+      - RESOLVER_MAX_CONCURRENT
+      - RESOLVER_SLOT_WAIT
+      - RESOLVER_LOG
+    depends_on:
+      watchsync-bgutil:
+        condition: service_healthy
+    networks:
+      - watchsync-internal
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,os;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8080')+'/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # PO-token provider for YouTube captions. Built locally from the 1.2.2 tag
+  # because the Docker Hub image is not pullable from this server.
+  watchsync-bgutil:
+    image: watchsync-bgutil:1.2.2
+    container_name: watchsync-bgutil
+    restart: unless-stopped
+    <<: *security
+    logging: *logging
+    mem_limit: 512m
+    cpus: "0.5"
+    pids_limit: 128
+    networks:
+      - watchsync-internal
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4416/ping').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  watchsync-client:
+    image: watchsync-client:latest
+    container_name: watchsync-client
+    restart: unless-stopped
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    <<: *security
+    logging: *logging
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    depends_on:
+      watchsync-server:
+        condition: service_healthy
+    networks:
+      - filemanager_default
+      - watchsync-internal
+    volumes:
+      - watchsync-streams:/dev/shm/streams
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  # همان شبکهای که کانتینر Caddy در آن است.
+  filemanager_default:
+    external: true
+
+  watchsync-internal:
+    driver: bridge
+
+volumes:
+  watchsync-streams:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=${STREAMS_TMPFS_SIZE:-512m},mode=1777"
+
+  watchsync-data:
+    driver: local
